@@ -1,0 +1,3 @@
+[submodule "KenshiCore"]
+	path = KenshiCore
+	url = https://github.com/Kakrain/KenshiCore
