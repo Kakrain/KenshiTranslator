@@ -1,4 +1,4 @@
-﻿using KenshiTranslator.Helper;
+﻿using KenshiCore;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -9,7 +9,7 @@ public class TranslationDictionary
 
     // Stores loaded translations from a .dict file
     private Dictionary<string, string> translations = new();
-    private static string lineEnd="|_END_|";
+    private static string lineEnd="|_END_|\n";
     private static string sep = "|_SEP_|";
 
     public TranslationDictionary(ReverseEngineer re)
@@ -93,13 +93,16 @@ public class TranslationDictionary
             recordIndex++;
         }
     }
+    public int getTotalToBeTranslated(string dictFilePath)
+    {
+        return File.ReadAllText(dictFilePath).Split(lineEnd).Length;
+    }
     public static async Task ApplyTranslationsAsync(
     string dictFilePath,
     Func<string, Task<string>> translateFunc,
-    IProgress<int>? progress = null,
     int batchSize = 100)
     {
-        var all = File.ReadAllText(dictFilePath).Split(lineEnd);
+        var all = File.ReadAllText(dictFilePath).Split(lineEnd, StringSplitOptions.RemoveEmptyEntries);
         int total = all.Length;
         int completed = 0;
         List<string> failedTranslations = new();
@@ -107,9 +110,9 @@ public class TranslationDictionary
         for (int i = 0; i < total; i++)
         {
             var parts = all[i].Split(sep);
-            if (parts.Length < 3) { completed++; progress?.Report((completed * 100) / total); continue; }
             string original = parts[1];
             string translated = parts[2];
+
             if (string.IsNullOrWhiteSpace(translated))
             {
                 try
@@ -141,8 +144,6 @@ public class TranslationDictionary
             // Save every batchSize lines
             if (i % batchSize == 0)
                 File.WriteAllText(dictFilePath,string.Join(lineEnd,all));
-
-            progress?.Report((completed * 100) / total);
         }
         File.WriteAllText(dictFilePath, string.Join(lineEnd, all));
     }

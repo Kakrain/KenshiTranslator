@@ -1,4 +1,3 @@
-using KenshiTranslator.Helper;
 using System.Reflection;
 using GTranslate;
 namespace KenshiTranslator;

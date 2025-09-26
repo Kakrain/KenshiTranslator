@@ -9,9 +9,6 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <None Remove="icons\kenshiicon.png" />
-    <None Remove="icons\selectedicon.png" />
-    <None Remove="icons\steamicon.png" />
     <None Remove="LanguageModels\Core14.profile.xml" />
   </ItemGroup>
 
@@ -19,12 +16,6 @@
     <Content Include="LanguageModels\Core14.profile.xml">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
-  </ItemGroup>
-
-  <ItemGroup>
-    <EmbeddedResource Include="icons\kenshiicon.png" />
-    <EmbeddedResource Include="icons\selectedicon.png" />
-    <EmbeddedResource Include="icons\steamicon.png" />
   </ItemGroup>
 
   <ItemGroup>
@@ -38,5 +29,9 @@
       <CopyToOutputDirectory>Never</CopyToOutputDirectory>
     </None>
   </ItemGroup>
+  <ItemGroup>
+  <ProjectReference Include="..\KenshiCore\KenshiCore.csproj" />
+</ItemGroup>
+
 
 </Project>

@@ -28,10 +28,18 @@ namespace KenshiTranslator.Translator
         public static GTranslate_Translator Instance => _instance.Value;
         public async Task<string> TranslateAsync(string text, string sourceLang  = "auto", string targetLang = "en")
         {
+            //try
+            //{
                 var from = GTranslate.Language.GetLanguage(sourceLang);
                 var to = GTranslate.Language.GetLanguage(targetLang);
                 var translated = await current_translator.TranslateAsync(text, to, from);
                 return translated.Translation;
+           // }
+            //catch(Exception ex)
+           // {
+            //    MessageBox.Show($"Translator failed on text:\n\"{text}\"\n\nError: {ex.Message}");
+            //    return "";
+           // }
         }
         public async Task<Dictionary<string, string>> GetSupportedLanguagesAsync()
         {
