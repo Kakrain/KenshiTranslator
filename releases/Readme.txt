@@ -1,4 +1,4 @@
-Kenshi Translator — v2.02
+Kenshi Translator — v2.03
 Extracts strings from Kenshi .mod -> produces .dict -> translates -> applies back to .mod (backup created).
 
 Installation:

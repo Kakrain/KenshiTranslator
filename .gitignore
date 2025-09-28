@@ -18,3 +18,9 @@ out/
 *.bak
 *.swp
 *~
+
+# Google Account Key
+*.json
+
+# output files
+*.txt

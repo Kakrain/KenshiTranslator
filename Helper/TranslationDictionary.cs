@@ -1,7 +1,9 @@
 ﻿using KenshiCore;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
+using System.Text.RegularExpressions;
 
 public class TranslationDictionary
 {
@@ -9,14 +11,14 @@ public class TranslationDictionary
 
     // Stores loaded translations from a .dict file
     private Dictionary<string, string> translations = new();
-    private static string lineEnd="|_END_|\n";
-    private static string sep = "|_SEP_|";
+    private static readonly string lineEnd="|_END_|\n";
+    private static readonly string sep = "|_SEP_|";
+
 
     public TranslationDictionary(ReverseEngineer re)
     {
         reverseEngineer = re;
     }
-
     // Export all strings to a .dict file
     public void ExportToDictFile(string path)
     {
@@ -97,55 +99,181 @@ public class TranslationDictionary
     {
         return File.ReadAllText(dictFilePath).Split(lineEnd).Length;
     }
-    public static async Task ApplyTranslationsAsync(
+    private static async Task<string?> TryTranslateNormalAsync(
+    string text, Func<string, Task<string>> translateFunc, List<string> constants)
+    {
+        string translated = await translateFunc(text);
+        if (ContainsAllConstants(translated, constants))
+            return translated;
+        return null;
+    }
+    //Translation with ¤0¤ markers
+    private static async Task<string?> TryTranslateWithSimpleMarkersAsync(
+    string text, Func<string, Task<string>> translateFunc, List<string> constants)
+    {
+        var mapping = constants.Select((c, i) => new { Const = c, Marker = $"¤{i}¤" }).ToList();
+        string marked = text;
+        foreach (var m in mapping)
+            marked = marked.Replace(m.Const, m.Marker);
+
+        string translated = await translateFunc(marked);
+
+        foreach (var m in mapping)
+            translated = translated.Replace(m.Marker, m.Const);
+
+        if (ContainsAllConstants(translated, constants))
+            return translated;
+        return null;
+    }
+
+    // 3. Translation with [[MARKER_0]]
+    private static async Task<string?> TryTranslateWithVerboseMarkersAsync(
+        string text, Func<string, Task<string>> translateFunc, List<string> constants)
+    {
+        var mapping = constants.Select((c, i) => new { Const = c, Marker = $"[[MARKER_{i}]]" }).ToList();
+        string marked = text;
+        foreach (var m in mapping)
+            marked = marked.Replace(m.Const, m.Marker);
+
+        string translated = await translateFunc(marked);
+
+        foreach (var m in mapping)
+            translated = translated.Replace(m.Marker, m.Const);
+
+        if (ContainsAllConstants(translated, constants))
+            return translated;
+        return null;
+    }
+    private static async Task<string> TranslateSplitAsync(
+    string text, Func<string, Task<string>> translateFunc, List<string> constants)
+    {
+        var parts = Regex.Split(text, @"(\/[A-Z0-9_]+\/)"); // keep delimiters
+        for (int i = 0; i < parts.Length; i++)
+        {
+            if (!constants.Contains(parts[i]))
+            {
+                string translated = await translateFunc(parts[i]);
+                parts[i] = translated;
+            }
+        }
+        return string.Join("", parts);
+    }
+    // Utility: check constants
+    private static bool ContainsAllConstants(string text, List<string> constants)
+    {
+        return constants.All(c => text.Contains(c));
+    }
+
+    public static async Task<int> ApplyTranslationsAsync(
     string dictFilePath,
     Func<string, Task<string>> translateFunc,
-    int batchSize = 100)
+    int batchSize = 100,
+    Action<string, string, bool>? logTranslation = null,
+    Action<string, string>? logError = null,
+    Func<List<string>, Task<List<string>>>? batchTranslateFunc = null)
     {
         var all = File.ReadAllText(dictFilePath).Split(lineEnd, StringSplitOptions.RemoveEmptyEntries);
-        int total = all.Length;
-        int completed = 0;
-        List<string> failedTranslations = new();
+        int totalSuccess = 0;
 
-        for (int i = 0; i < total; i++)
+        for (int batchStart = 0; batchStart < all.Length; batchStart += batchSize)
         {
-            var parts = all[i].Split(sep);
-            string original = parts[1];
-            string translated = parts[2];
+            int batchEnd = Math.Min(batchStart + batchSize, all.Length);
+            totalSuccess += await ProcessTranslationBatchAsync(
+                all, batchStart, batchEnd, translateFunc, batchTranslateFunc, logTranslation, logError);
 
-            if (string.IsNullOrWhiteSpace(translated))
-            {
-                try
-                {
-                    int retries = 3;
-                    for (int attempt = 0; attempt < retries; attempt++)
-                    {
-                        try
-                        {
-                            translated = await translateFunc(original);
-                            if (!string.IsNullOrWhiteSpace(translated))
-                            {
-                                parts[2] = translated;
-                                break;
-                            }
-                        }
-                        catch (Exception ex) when (ex.Message.Contains("429"))
-                        {
-                            await Task.Delay((attempt + 1) * 1000);
-                        }
-                    }
-                    await Task.Delay(100);
-                }
-                catch{}
-            }
-            all[i] = string.Join(sep, parts);
-            completed++;
-
-            // Save every batchSize lines
-            if (i % batchSize == 0)
-                File.WriteAllText(dictFilePath,string.Join(lineEnd,all));
+            // Save after each batch
+            File.WriteAllText(dictFilePath, string.Join(lineEnd, all));
         }
-        File.WriteAllText(dictFilePath, string.Join(lineEnd, all));
+
+        return totalSuccess;
+    }
+
+    private static async Task<int> ProcessTranslationBatchAsync(
+    string[] all,
+    int batchStart,
+    int batchEnd,
+    Func<string, Task<string>> translateFunc,
+    Func<List<string>,Task<List<string>>>? batchTranslateFunc,
+    Action<string, string, bool>? logTranslation,
+    Action<string, string>? logError)
+    {
+        int successCount = 0;
+
+        var batch = all.Skip(batchStart).Take(batchEnd - batchStart).ToList();
+
+        // Select items that need translation
+        var itemsToTranslate = batch
+            .Select((line, index) => (line, index))
+            .Where(t => string.IsNullOrWhiteSpace(t.line.Split(sep)[2]))
+            .ToList();
+
+        if (itemsToTranslate.Count == 0) return 0;
+
+        if (batchTranslateFunc != null)
+        {
+            try
+            {
+                var originals = itemsToTranslate.Select(t => t.line.Split(sep)[1]).ToList();
+                //var translations = await batchTranslateFunc(originals, "en", "ru").ConfigureAwait(false);
+                var translations = await batchTranslateFunc(originals).ConfigureAwait(false);
+
+                if (translations != null && translations.Count == originals.Count)
+                {
+                    for (int i = 0; i < itemsToTranslate.Count; i++)
+                    {
+                        var (line, index) = itemsToTranslate[i];
+                        var parts = line.Split(sep);
+                        parts[2] = translations[i];
+                        all[batchStart + index] = string.Join(sep, parts);
+                        successCount++;
+                        logTranslation?.Invoke(parts[1], translations[i], true);
+                    }
+
+                    return successCount; // Batch succeeded, no need for per-item
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[TranslationDict] Batch translation failed: {ex.Message}");
+                logError?.Invoke("Batch translation", ex.Message); 
+            }
+        }
+        // Per-item translation directly
+        foreach (var (line, index) in itemsToTranslate)
+        {
+            var parts = line.Split(sep);
+            try
+            {
+                var translation = await TranslateWithFallbacksAsync(parts[1], translateFunc);
+                parts[2] = translation;
+                all[batchStart + index] = string.Join(sep, parts);
+                successCount++;
+                logTranslation?.Invoke(parts[1], translation, true);
+            }
+            catch (Exception ex)
+            {
+                parts[2] = parts[1];
+                all[batchStart + index] = string.Join(sep, parts);
+                logError?.Invoke(parts[1], ex.Message);
+            }
+        }
+        return successCount;
+    }
+    public static async Task<string> TranslateWithFallbacksAsync(
+    string text, Func<string, Task<string>> translateFunc)
+    {
+        var constants = Regex.Matches(text, @"\/[A-Z0-9_]+\/")
+                             .Cast<Match>().Select(m => m.Value).ToList();
+
+        // If no constants, just translate normally
+        if (constants.Count == 0)
+            return await translateFunc(text);
+
+        // Tries to translate while mantaining constants.
+        return await TryTranslateNormalAsync(text, translateFunc, constants)
+            ?? await TryTranslateWithSimpleMarkersAsync(text, translateFunc, constants)
+            ?? await TryTranslateWithVerboseMarkersAsync(text, translateFunc, constants)
+            ?? await TranslateSplitAsync(text, translateFunc, constants);
     }
     public static int GetTranslationProgress(string dictFilePath)
     {
