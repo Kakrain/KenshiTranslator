@@ -1,5 +1,4 @@
 ﻿using KenshiCore;
-using KenshiTranslator.Helper;
 using KenshiTranslator.Translator;
 using NTextCat;
 using System.Collections;
@@ -27,7 +26,7 @@ namespace KenshiTranslator
         private Label apiStatusLabel;
         private CustomApiTranslator? _customApiTranslator;
         private Button TranslateModButton;
-        private TranslationLogForm? logForm;
+        private GeneralLogForm? logForm;
         private Button ShowLogButton;
 
         public class ComboItem
@@ -132,7 +131,7 @@ namespace KenshiTranslator
         {
             if (logForm == null || logForm.IsDisposed)
             {
-                logForm = new TranslationLogForm();
+                logForm = new GeneralLogForm();
             }
 
             if (logForm.Visible)
@@ -165,7 +164,8 @@ namespace KenshiTranslator
         }
         private async Task OnShownAsync(EventArgs e)
         {
-            await InitializationTask;
+            if(InitializationTask!=null)
+                await InitializationTask;
 
             InitLanguageDetector();
 
@@ -224,7 +224,6 @@ namespace KenshiTranslator
                 }
                 else
                 {
-                    // User cancelled file selection, revert to previous provider
                     providerCombo.SelectedIndex = 0; // Aggregate
                     return;
                 }
@@ -276,25 +275,6 @@ namespace KenshiTranslator
                 fromLangCombo.SelectedValue = _supportedLanguages!.ContainsKey(lastSelectedFromLang)?lastSelectedFromLang:"en";
             if (toLangCombo.Items.Count > 0)
                 toLangCombo.SelectedValue = _supportedLanguages!.ContainsKey(lastSelectedToLang)?lastSelectedToLang: "en";
-            
-            //###########################################
-            /*_activeTranslator = GTranslate_Translator.Instance;
-            ((GTranslate_Translator)_activeTranslator).setTranslator(providerCombo.SelectedItem.ToString()!);
-
-            _supportedLanguages = await _activeTranslator.GetSupportedLanguagesAsync();
-
-            fromLangCombo.DataSource = _supportedLanguages.Select(lang => new ComboItem(lang.Key, lang.Value)).ToList();
-            fromLangCombo.DisplayMember = "Name";
-            fromLangCombo.ValueMember = "Code";
-
-            toLangCombo.DataSource = _supportedLanguages.Select(lang => new ComboItem(lang.Key, lang.Value)).ToList();
-            toLangCombo.DisplayMember = "Name";
-            toLangCombo.ValueMember = "Code";
-
-            if (fromLangCombo.Items.Count > 0)
-                fromLangCombo.SelectedValue = lastSelectedFromLang;
-            if (toLangCombo.Items.Count > 0)
-                toLangCombo.SelectedValue = lastSelectedToLang;*/
         }
         private void LoadLanguageCache()
         {
@@ -362,7 +342,6 @@ namespace KenshiTranslator
                 MessageBox.Show("Mod file not found!");
                 return;
             }
-
             // Ensure dictionary exists
             string dictFile = mod.getDictFilePath();
             modM.LoadModFile(modPath);
@@ -372,7 +351,7 @@ namespace KenshiTranslator
                 td.ExportToDictFile(dictFile);
             if (logForm == null || logForm.IsDisposed)
             {
-                logForm = new TranslationLogForm();
+                logForm = new GeneralLogForm();
             }
             logForm.Reset();
             ShowLogButton.Enabled = true;
@@ -382,8 +361,6 @@ namespace KenshiTranslator
 
             string sourceLang = fromLangCombo.SelectedItem?.ToString()?.Split(' ')[0] ?? "auto";
             string targetLang = toLangCombo.SelectedItem?.ToString()?.Split(' ')[0] ?? "en";
-            //string sourceLang = fromLangCombo.SelectedItem?.ToString()?.Split(' ')[0] ?? "auto";
-            //string targetLang = toLangCombo.SelectedItem?.ToString()?.Split(' ')[0] ?? "en";
             int failureCount = 0;
             int successCount = 0;
             const int failureThreshold = 10;
@@ -421,8 +398,8 @@ namespace KenshiTranslator
                             return "";
                     }
                 },batchTranslateFunc != null ? 100 : 200,
-                (original, translated, success) => logForm?.LogTranslation(original, translated, success),
-                (original, error) => logForm?.LogError(original, error),
+                (original, translated, success) => logForm?.Log(original+" : "+ translated +" " + (success ? "✓" : "✗"),null),
+                (original, error) => logForm?.LogError(original+":"+error),
                 batchTranslateFunc).ConfigureAwait(false);//sourceLang targetLang
             }// limit concurrent requests to prevent API issues
             catch (Exception ex)
