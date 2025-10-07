@@ -542,6 +542,7 @@ namespace KenshiTranslator.Translator
                     {"ar", "Arabic"},
                     {"hi", "Hindi"},
                     {"pt", "Portuguese"},
+                    {"pt-BR", "Portuguese (Brazilian)"},
                     {"pl", "Polish"},
                     {"nl", "Dutch"},
                     {"sv", "Swedish"},

@@ -48,6 +48,12 @@ namespace KenshiTranslator
             Width = 800;
             Height = 500;
 
+            // Enable multi-select in ListView
+            if (modsListView != null)
+            {
+                modsListView.MultiSelect = true;
+            }
+
             providerCombo = new ComboBox { Dock = DockStyle.Top, DropDownStyle = ComboBoxStyle.DropDownList };
             providerCombo.Items.AddRange(new string[] { "Aggregate", "Bing", "Google", "Google2", "Microsoft", "Yandex", "Google Cloud V3", "Custom API" });
             providerCombo.SelectedIndex = 0;
@@ -328,97 +334,140 @@ namespace KenshiTranslator
         private async Task CreateDictionaryButton_Click()
         {
             if (modsListView.SelectedItems.Count == 0)
-                return;
-
-            var selectedItem = modsListView.SelectedItems[0];
-            string modName = selectedItem.Text;
-
-            if (!mergedMods.TryGetValue(modName, out var mod))
-                return;
-
-            string modPath = mod.getModFilePath()!;
-            if (!File.Exists(modPath))
             {
-                MessageBox.Show("Mod file not found!");
+                MessageBox.Show("Please select at least one mod to translate.", "No Selection", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
-            // Ensure dictionary exists
-            string dictFile = mod.getDictFilePath();
-            modM.LoadModFile(modPath);
-            var td = new TranslationDictionary(modM.GetReverseEngineer());
 
-            if (!File.Exists(dictFile))
-                td.ExportToDictFile(dictFile);
+            // Limit to 50 mods at a time
+            if (modsListView.SelectedItems.Count > 50)
+            {
+                MessageBox.Show("Please select a maximum of 50 mods at a time.", "Too Many Selections", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            // Collect selected mods
+            var selectedMods = modsListView.SelectedItems.Cast<ListViewItem>()
+                .Select(item => (ModItem)item.Tag!)
+                .ToList();
+
+            // Confirm batch translation
+            var confirmResult = MessageBox.Show(
+                $"You are about to translate {selectedMods.Count} mod(s).\n\nThis may take a while. Continue?",
+                "Batch Translation",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Question);
+
+            if (confirmResult != DialogResult.Yes)
+                return;
+
+            // Prepare log
             if (logForm == null || logForm.IsDisposed)
             {
                 logForm = new GeneralLogForm();
             }
             logForm.Reset();
             ShowLogButton.Enabled = true;
-            int total= td.getTotalToBeTranslated(dictFile);
-            InitializeProgress(0, total);
-            ReportProgress(0, $"Translating {modName}... {0}/{total}");
 
-            string sourceLang = fromLangCombo.SelectedItem?.ToString()?.Split(' ')[0] ?? "auto";
-            string targetLang = toLangCombo.SelectedItem?.ToString()?.Split(' ')[0] ?? "en";
-            int failureCount = 0;
-            int successCount = 0;
-            const int failureThreshold = 10;
-            // Start async translation with resume support
-            try
+            string sourceLang = (fromLangCombo.SelectedItem as ComboItem)?.Code ?? "auto";
+            string targetLang = (toLangCombo.SelectedItem as ComboItem)?.Code ?? "en";
+
+            // Process each mod
+            int modsCompleted = 0;
+            int modsWithErrors = 0;
+
+            foreach (var mod in selectedMods)
             {
+                string modName = mod.Name;
+                modsCompleted++;
 
-                Func<List<string>, Task<List<string>>>? batchTranslateFunc = null;
-                if (_activeTranslator is CustomApiTranslator customApi &&
-                    customApi.CurrentApiType == ApiType.GoogleCloudV3)
+                try
                 {
-                   batchTranslateFunc = (texts) => customApi.TranslateBatchV3Async(texts, sourceLang, targetLang);
-                   Debug.WriteLine("[MainForm] Using Google V3 batch translation - much faster!");
+                    string modPath = mod.getModFilePath()!;
+                    if (!File.Exists(modPath))
+                    {
+                        logForm?.LogError($"[{modName}] Mod file not found: {modPath}");
+                        modsWithErrors++;
+                        continue;
+                    }
+
+                    // Ensure dictionary exists
+                    string dictFile = mod.getDictFilePath();
+                    modM.LoadModFile(modPath);
+                    var td = new TranslationDictionary(modM.GetReverseEngineer());
+
+                    if (!File.Exists(dictFile))
+                        td.ExportToDictFile(dictFile);
+
+                    int total = td.getTotalToBeTranslated(dictFile);
+                    InitializeProgress(0, total);
+                    ReportProgress(0, $"[{modsCompleted}/{selectedMods.Count}] Translating {modName}... {0}/{total}");
+
+                    int failureCount = 0;
+                    int successCount = 0;
+                    const int failureThreshold = 10;
+
+                    Func<List<string>, Task<List<string>>>? batchTranslateFunc = null;
+                    if (_activeTranslator is CustomApiTranslator customApi &&
+                        customApi.CurrentApiType == ApiType.GoogleCloudV3)
+                    {
+                        batchTranslateFunc = (texts) => customApi.TranslateBatchV3Async(texts, sourceLang, targetLang);
+                        Debug.WriteLine($"[MainForm] Using Google V3 batch translation for {modName}");
+                    }
+
+                    successCount = await TranslationDictionary.ApplyTranslationsAsync(dictFile, async (original) =>
+                    {
+                        try
+                        {
+                            if (failureCount >= failureThreshold)
+                                return "";
+                            var translated = await _activeTranslator.TranslateAsync(original, sourceLang, targetLang);
+                            return translated;
+                        }
+                        catch (Exception ex)
+                        {
+                            failureCount++;
+                            if (failureCount >= failureThreshold)
+                                throw new InvalidOperationException($"Too many consecutive translation failures. The provider {_activeTranslator.Name} may not be working.{ex.Message}");
+                            return "";
+                        }
+                    }, batchTranslateFunc != null ? 100 : 200,
+                    (original, translated, success) => {
+                        logForm?.Log($"[{modName}] {original} : {translated} " + (success ? "✓" : "✗"), null);
+                        Interlocked.Increment(ref successCount);
+                        if (successCount % 20 == 0 || successCount == total)
+                            ReportProgress(successCount, $"[{modsCompleted}/{selectedMods.Count}] Translating {modName}... {successCount}/{total}");
+                    },
+                    (original, error) => logForm?.LogError($"[{modName}] {original}: {error}"),
+                    batchTranslateFunc).ConfigureAwait(false);
+
+                    if (successCount == 0)
+                    {
+                        logForm?.LogError($"[{modName}] No translations were produced.");
+                        modsWithErrors++;
+                    }
+                    else
+                    {
+                        ReportProgress(total, $"[{modsCompleted}/{selectedMods.Count}] {modName} complete: {successCount}/{total}");
+                        updateTranslationProgress(modName);
+                    }
                 }
-
-
-                await TranslationDictionary.ApplyTranslationsAsync(dictFile, async (original) =>
+                catch (Exception ex)
                 {
-                    try
-                    {
-                        if (failureCount >= failureThreshold)
-                            return "";
-                        var translated = await _activeTranslator.TranslateAsync(original, sourceLang, targetLang);
-                        int done = Interlocked.Increment(ref successCount);
-                        ReportProgress(done, $"Translating {modName}... {done}/{total}");
-                        return translated;
+                    logForm?.LogError($"[{modName}] Translation failed: {ex.Message}");
+                    modsWithErrors++;
+                }
+            }
 
-                    }
-                    catch (Exception ex)
-                    {
-                        MessageBox.Show($"Error on string {successCount}: {ex.Message}");
-                        failureCount++;
-                        if (failureCount >= failureThreshold)
-                            throw new InvalidOperationException($"Too many consecutive translation failures. The provider {_activeTranslator.Name} may not be working.{ex.Message}");
-                            return "";
-                    }
-                },batchTranslateFunc != null ? 100 : 200,
-                (original, translated, success) => logForm?.Log(original+" : "+ translated +" " + (success ? "✓" : "✗"),null),
-                (original, error) => logForm?.LogError(original+":"+error),
-                batchTranslateFunc).ConfigureAwait(false);//sourceLang targetLang
-            }// limit concurrent requests to prevent API issues
-            catch (Exception ex)
-            {
-                ReportProgress(0, "Translation aborted.");
-                MessageBox.Show($"Dictionary translation failed: {ex.Message}",
-                    "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                return;
-            }
-            if (successCount == 0)
-            {
-                MessageBox.Show($"No translations were produced. Try a different provider (current: {_activeTranslator.Name}).",
-                    "Translation Failed", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
-            }
-            ReportProgress(total, $"Dictionary complete {modName}... {total}/{total}");
-            MessageBox.Show($"{modName}: Dictionary generated!");
-            updateTranslationProgress(modName);
-            TranslateModButton.Enabled = File.Exists(mod.getDictFilePath());
+            // Final summary
+            int modsSuccessful = modsCompleted - modsWithErrors;
+            MessageBox.Show(
+                $"Batch translation complete!\n\n✓ Successful: {modsSuccessful}\n✗ Errors: {modsWithErrors}\n\nTotal: {modsCompleted} mods",
+                "Batch Translation Complete",
+                MessageBoxButtons.OK,
+                modsWithErrors > 0 ? MessageBoxIcon.Warning : MessageBoxIcon.Information);
+
+            TranslateModButton.Enabled = modsListView.SelectedItems.Count > 0;
         }
         private async Task TestApiButton_Click()
         {
@@ -463,44 +512,120 @@ namespace KenshiTranslator
         private async Task TranslateModButton_Click()
         {
             if (modsListView.SelectedItems.Count == 0)
-                return;
-            var selectedItem = modsListView.SelectedItems[0];
-            string modName = selectedItem.Text;
-
-            if (!mergedMods.TryGetValue(modName, out var mod))
-                return;
-            string modPath = mod.getModFilePath()!;
-            string dictFile = mod.getDictFilePath();
-            lock (reLockRE)
             {
-                modM.LoadModFile(modPath);
-                var td = new TranslationDictionary(modM.GetReverseEngineer());
-                td.ImportFromDictFile(dictFile);
-                int progress = TranslationDictionary.GetTranslationProgress(dictFile);
-                if (progress < 95)
-                {
-                    var result = MessageBox.Show(
-                        $"Dictionary of {modName} is only {progress}% complete.\n\nDo you want to apply the partial translation anyway?",
-                        "Partial Translation",
-                        MessageBoxButtons.YesNo,
-                        MessageBoxIcon.Question);
-
-                    if (result == DialogResult.No)
-                        return;
-                }
-                /*if (TranslationDictionary.GetTranslationProgress(dictFile) != 100)
-                {
-                    MessageBox.Show($"Dictionary of {modName} is not complete!");
-                    return;
-                }*/
-                if (!File.Exists(mod.getBackupFilePath()))
-                    File.Copy(modPath, mod.getBackupFilePath());
-                modM.GetReverseEngineer().SaveModFile(modPath);
-                MessageBox.Show($"Translation of {modName} is finished!");
+                MessageBox.Show("Please select at least one mod to apply translations.", "No Selection", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
             }
-            UpdateDetectedLanguage(modName, await DetectModLanguagesAsync(mod));
-            updateTranslationProgress(modName);
-            return;
+
+            // Limit to 50 mods at a time
+            if (modsListView.SelectedItems.Count > 50)
+            {
+                MessageBox.Show("Please select a maximum of 50 mods at a time.", "Too Many Selections", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            // Collect selected mods
+            var selectedMods = modsListView.SelectedItems.Cast<ListViewItem>()
+                .Select(item => (ModItem)item.Tag!)
+                .ToList();
+
+            // Check if all mods have dictionaries
+            var modsWithoutDict = selectedMods.Where(m => !File.Exists(m.getDictFilePath())).ToList();
+            if (modsWithoutDict.Any())
+            {
+                MessageBox.Show(
+                    $"{modsWithoutDict.Count} mod(s) don't have translation dictionaries yet.\n\nPlease create dictionaries first using 'Create Dictionary' button.",
+                    "Missing Dictionaries",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+                return;
+            }
+
+            // Check for incomplete translations
+            var incompleteModsInfo = selectedMods
+                .Select(m => new { Mod = m, Progress = TranslationDictionary.GetTranslationProgress(m.getDictFilePath()) })
+                .Where(x => x.Progress < 95)
+                .ToList();
+
+            if (incompleteModsInfo.Any())
+            {
+                var incompleteList = string.Join("\n", incompleteModsInfo.Select(x => $"  • {x.Mod.Name}: {x.Progress}%"));
+                var result = MessageBox.Show(
+                    $"{incompleteModsInfo.Count} mod(s) have incomplete translations:\n\n{incompleteList}\n\nDo you want to apply partial translations anyway?",
+                    "Partial Translations",
+                    MessageBoxButtons.YesNo,
+                    MessageBoxIcon.Question);
+
+                if (result == DialogResult.No)
+                    return;
+            }
+
+            // Confirm batch application
+            var confirmResult = MessageBox.Show(
+                $"You are about to apply translations to {selectedMods.Count} mod(s).\n\nBackups will be created automatically. Continue?",
+                "Batch Apply Translations",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Question);
+
+            if (confirmResult != DialogResult.Yes)
+                return;
+
+            // Process each mod
+            int modsCompleted = 0;
+            int modsSuccessful = 0;
+            int modsWithErrors = 0;
+
+            InitializeProgress(0, selectedMods.Count);
+
+            foreach (var mod in selectedMods)
+            {
+                string modName = mod.Name;
+                modsCompleted++;
+                ReportProgress(modsCompleted, $"[{modsCompleted}/{selectedMods.Count}] Applying {modName}...");
+
+                try
+                {
+                    string modPath = mod.getModFilePath()!;
+                    string dictFile = mod.getDictFilePath();
+
+                    if (!File.Exists(modPath))
+                    {
+                        modsWithErrors++;
+                        continue;
+                    }
+
+                    lock (reLockRE)
+                    {
+                        modM.LoadModFile(modPath);
+                        var td = new TranslationDictionary(modM.GetReverseEngineer());
+                        td.ImportFromDictFile(dictFile);
+
+                        // Create backup if doesn't exist
+                        if (!File.Exists(mod.getBackupFilePath()))
+                            File.Copy(modPath, mod.getBackupFilePath());
+
+                        modM.GetReverseEngineer().SaveModFile(modPath);
+                    }
+
+                    // Update language detection
+                    UpdateDetectedLanguage(modName, await DetectModLanguagesAsync(mod));
+                    updateTranslationProgress(modName);
+                    modsSuccessful++;
+                }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine($"[TranslateMod] Error applying {modName}: {ex.Message}");
+                    modsWithErrors++;
+                }
+            }
+
+            // Final summary
+            ReportProgress(selectedMods.Count, $"Batch apply complete: {modsSuccessful}/{selectedMods.Count}");
+            MessageBox.Show(
+                $"Batch apply translations complete!\n\n✓ Successful: {modsSuccessful}\n✗ Errors: {modsWithErrors}\n\nTotal: {modsCompleted} mods",
+                "Batch Apply Complete",
+                MessageBoxButtons.OK,
+                modsWithErrors > 0 ? MessageBoxIcon.Warning : MessageBoxIcon.Information);
         }
         private void OpenSteamLinkButton_Click(object? sender, EventArgs e)
         {
