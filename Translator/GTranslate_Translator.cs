@@ -3,7 +3,7 @@ namespace KenshiTranslator.Translator
 {
     public class GTranslate_Translator : TranslatorInterface
     {
-        public string Name => "Google Translate";
+        public string Name { get; private set; } = "Aggregate";
         private static readonly Lazy<GTranslate_Translator> _instance =
             new(() => new GTranslate_Translator());
         private Dictionary<string, GTranslate.Translators.ITranslator> translators;
@@ -20,26 +20,23 @@ namespace KenshiTranslator.Translator
             { "Yandex", new GTranslate.Translators.YandexTranslator()}
         };
             current_translator = translators.GetValueOrDefault("Aggregate")!;
+            
         }
         public void setTranslator(string translator)
         {
-            current_translator = translators.GetValueOrDefault(translator)!; 
+            if (translators.TryGetValue(translator, out var t))
+            {
+                current_translator = t;
+                Name = translator;
+            }
         }
         public static GTranslate_Translator Instance => _instance.Value;
         public async Task<string> TranslateAsync(string text, string sourceLang  = "auto", string targetLang = "en")
         {
-            //try
-            //{
                 var from = GTranslate.Language.GetLanguage(sourceLang);
                 var to = GTranslate.Language.GetLanguage(targetLang);
                 var translated = await current_translator.TranslateAsync(text, to, from);
                 return translated.Translation;
-           // }
-            //catch(Exception ex)
-           // {
-            //    MessageBox.Show($"Translator failed on text:\n\"{text}\"\n\nError: {ex.Message}");
-            //    return "";
-           // }
         }
         public async Task<Dictionary<string, string>> GetSupportedLanguagesAsync()
         {

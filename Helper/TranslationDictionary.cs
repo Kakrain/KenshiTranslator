@@ -26,14 +26,25 @@ public class TranslationDictionary
 
         // Export description
         if (reverseEngineer.modData.Header!.FileType == 16 && reverseEngineer.modData.Header.Description != null)
-            writer.Write($"description{sep}{reverseEngineer.modData.Header.Description}{sep}{lineEnd}");
+        {
+            string desc = reverseEngineer.modData.Header.Description ?? "";
+            string limited = desc.Length > 999 ? desc.Substring(0, 999) : desc;
+
+            writer.Write($"description{sep}{limited}{sep}{lineEnd}");
+        }
 
         // Export records
         int recordIndex = 1;
         foreach (var record in reverseEngineer.modData.Records!)
         {
-            if (record.Name != null)
+            if (record.Name != null && !ModRecord.ModTypeCodes.Values.Any(s => record.Name.Contains(s)))
                 writer.Write($"record{recordIndex}_name{sep}{record.Name}{sep}{lineEnd}");
+            else
+            {
+                writer.Write($"record{recordIndex}_name{sep}{record.Name}{sep}{record.Name}{lineEnd}");
+                CoreUtils.Print(record.Name + " skipped");
+            }
+                
 
             if (record.StringFields != null)
             {
@@ -107,7 +118,7 @@ public class TranslationDictionary
             return translated;
         return null;
     }
-    //Translation with ¤0¤ markers
+    //Translation with markers
     private static async Task<string?> TryTranslateWithSimpleMarkersAsync(
     string text, Func<string, Task<string>> translateFunc, List<string> constants)
     {
@@ -244,7 +255,8 @@ public class TranslationDictionary
             var parts = line.Split(sep);
             try
             {
-                var translation = await TranslateWithFallbacksAsync(parts[1], translateFunc);
+                var translation = parts[1];
+                translation = await TranslateWithFallbacksAsync(parts[1], translateFunc);
                 parts[2] = translation;
                 all[batchStart + index] = string.Join(sep, parts);
                 successCount++;

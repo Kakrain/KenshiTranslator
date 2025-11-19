@@ -3,6 +3,7 @@ using KenshiTranslator.Translator;
 using NTextCat;
 using System.Collections;
 using System.Diagnostics;
+using System.Drawing.Interop;
 using System.Security.Policy;
 using System.Text;
 namespace KenshiTranslator
@@ -26,8 +27,6 @@ namespace KenshiTranslator
         private Label apiStatusLabel;
         private CustomApiTranslator? _customApiTranslator;
         private Button TranslateModButton;
-        private GeneralLogForm? logForm;
-        private Button ShowLogButton;
 
         public class ComboItem
         {   
@@ -68,7 +67,7 @@ namespace KenshiTranslator
             AddButton("Create Dictionary", async (s, e) => await CreateDictionaryButton_Click());
             TranslateModButton = AddButton("Translate Mod", async (s, e) => await TranslateModButton_Click());
             
-            ShowLogButton = AddButton("Show Log",ShowLogButton_Click);
+            //ShowLogButton = AddButton("Show Log",ShowLogButton_Click);
 
             customApiTextBox = new TextBox
             {
@@ -127,22 +126,7 @@ namespace KenshiTranslator
             };
             AddColumn("Translation Progress", mod => getTranslationProgress(mod),200);
         }
-        private void ShowLogButton_Click(object? sender, EventArgs e)
-        {
-            if (logForm == null || logForm.IsDisposed)
-            {
-                logForm = new GeneralLogForm();
-            }
-
-            if (logForm.Visible)
-            {
-                logForm.BringToFront();
-            }
-            else
-            {
-                logForm.Show(this);
-            }
-        }
+        
         private void InitializeTranslatorColumns()
         {
             foreach (ListViewItem item in modsListView.Items)
@@ -349,12 +333,7 @@ namespace KenshiTranslator
 
             if (!File.Exists(dictFile))
                 td.ExportToDictFile(dictFile);
-            if (logForm == null || logForm.IsDisposed)
-            {
-                logForm = new GeneralLogForm();
-            }
-            logForm.Reset();
-            ShowLogButton.Enabled = true;
+            getLogForm().Reset();
             int total= td.getTotalToBeTranslated(dictFile);
             InitializeProgress(0, total);
             ReportProgress(0, $"Translating {modName}... {0}/{total}");
@@ -398,8 +377,8 @@ namespace KenshiTranslator
                             return "";
                     }
                 },batchTranslateFunc != null ? 100 : 200,
-                (original, translated, success) => logForm?.Log(original+" : "+ translated +" " + (success ? "✓" : "✗"),null),
-                (original, error) => logForm?.LogError(original+":"+error),
+                (original, translated, success) => getLogForm()?.Log(original+" : "+ translated +" " + (success ? "✓" : "✗"),null),
+                (original, error) => getLogForm()?.LogError(original+":"+error),
                 batchTranslateFunc).ConfigureAwait(false);//sourceLang targetLang
             }// limit concurrent requests to prevent API issues
             catch (Exception ex)
@@ -522,6 +501,8 @@ namespace KenshiTranslator
         }
         private string getTranslationProgress(ModItem mod)
         {
+            if (mod.getModFilePath() == null)
+                return "mod not found";
             int progress = File.Exists(mod.getDictFilePath()) ? TranslationDictionary.GetTranslationProgress(mod.getDictFilePath()) : File.Exists(mod.getBackupFilePath()) ? 100 : 0;
             return (progress== 100) ? "Translated" : progress > 0 ? $"{progress:F0}%" :"Not translated";
         }
