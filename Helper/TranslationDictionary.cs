@@ -1,4 +1,9 @@
-﻿using KenshiCore;
+﻿using KenshiCore.Mods;
+using KenshiCore.ReverseEngineering;
+using KenshiCore.UI;
+using KenshiCore.Utilities;
+using Newtonsoft.Json.Linq;
+using NTextCat.Commons;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -11,19 +16,59 @@ public class TranslationDictionary
 
     // Stores loaded translations from a .dict file
     private Dictionary<string, string> translations = new();
-    private static readonly string lineEnd="|_END_|\n";
+    private static readonly string lineEnd = "|_END_|";//\n";
     private static readonly string sep = "|_SEP_|";
+    private HashSet<string> unique_keys = new();
+    private const string BlacklistFile = "translator_blacklist.txt";
 
+    private HashSet<string> _blacklistKeys = new();
 
+    private void LoadBlacklist()
+    {
+        if (!File.Exists(BlacklistFile))
+        {
+            CreateDefaultBlacklist();
+        }
+
+        var lines = File.ReadAllLines(BlacklistFile);
+
+        _blacklistKeys = lines
+            .Select(l => l.Trim())
+            .Where(l => !string.IsNullOrWhiteSpace(l) && !l.StartsWith("#"))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+    }
+    private void CreateDefaultBlacklist()
+    {
+        var defaultEntries = new[]
+        {
+        "# Kenshi Translator blacklist",
+        "# These keys will NOT be translated",
+        "",
+        "bone name",
+        "placeholder",
+        "particle system",
+        "slave anim",
+        "anim name",
+        "filenames prefix",
+        "carry bone",
+        "stringvar",
+        "class name",
+        "layout exterior",
+        "layout interior"
+    };
+
+        File.WriteAllLines(BlacklistFile, defaultEntries);
+    }
     public TranslationDictionary(ReverseEngineer re)
     {
         reverseEngineer = re;
+        LoadBlacklist();
     }
     // Export all strings to a .dict file
     public void ExportToDictFile(string path)
     {
         using var writer = new StreamWriter(path);
-
+        var typeCodes = ModRecord.ModTypeCodes.Values;
         // Export description
         if (reverseEngineer.modData.Header!.FileType == 16 && reverseEngineer.modData.Header.Description != null)
         {
@@ -34,37 +79,41 @@ public class TranslationDictionary
         }
 
         // Export records
-        int recordIndex = 1;
         foreach (var record in reverseEngineer.modData.Records!)
         {
-            if (record.Name != null && !ModRecord.ModTypeCodes.Values.Any(s => record.Name.Contains(s)))
-                writer.Write($"record{recordIndex}_name{sep}{record.Name}{sep}{lineEnd}");
-            else
-            {
-                writer.Write($"record{recordIndex}_name{sep}{record.Name}{sep}{record.Name}{lineEnd}");
-                CoreUtils.Print(record.Name + " skipped");
-            }
-                
-
+            if (!record.Name.IsNullOrEmpty() && !typeCodes.Any(s => record.Name.Contains(s)))
+                writer.Write($"record{record.StringId}_name{sep}{record.Name}{sep}{lineEnd}");
             if (record.StringFields != null)
             {
-                foreach (var kvp in record.StringFields)
-                    if (!kvp.Value.Equals(""))
-                        writer.Write($"record{recordIndex}_{kvp.Key}{sep}{kvp.Value}{sep}{lineEnd}");
+                foreach (var kvp in record.StringFields) {
+                    if (!kvp.Value.IsNullOrEmpty() && !_blacklistKeys.Contains(kvp.Key))
+                        writer.Write($"record{record.StringId}_{kvp.Key}{sep}{kvp.Value}{sep}{lineEnd}");
+                    unique_keys.Add(kvp.Key);
+                }
             }
-            recordIndex++;
         }
+        /*CoreUtils.Print("####KEYS####:");
+        foreach (var kvp in unique_keys)
+        {
+            CoreUtils.Print(kvp);
+        }*/
     }
     public void ImportFromDictFile(string path)
     {
         if (!File.Exists(path))
-            throw new FileNotFoundException("Dictionary file not found.", path);
+        {
+            UiService.ShowMessage($"Dictionary file not found at path: {path}", "Error", MessageBoxIcon.Error);
+            return;
+        }
+            //throw new FileNotFoundException("Dictionary file not found.", path);
         translations.Clear();
         var all = File.ReadAllText(path);
-        foreach (var segment in all.Split(lineEnd))
+        var segments = all.Split(lineEnd, StringSplitOptions.RemoveEmptyEntries);
+        foreach (var raw in segments)//all.Split(lineEnd))
         {
+            var segment = raw.Trim();
             if (string.IsNullOrWhiteSpace(segment)) continue;
-            var parts = segment.Split(sep);
+            var parts = segment.Split(sep).Select(p => p.Trim()).ToArray();
             if (parts.Length < 2) continue;
             var key = parts[0].Trim();
             var original = parts[1].Trim();
@@ -80,12 +129,10 @@ public class TranslationDictionary
                 reverseEngineer.modData.Header.Description = desc;
             }
         }
-
-        int recordIndex = 1;
         foreach (var record in reverseEngineer.modData.Records!)
         {
             // record name
-            string nameKey = $"record{recordIndex}_name";
+            string nameKey = $"record{record.StringId}_name";
             if (record.Name != null && translations.TryGetValue(nameKey, out var newName) && !string.IsNullOrWhiteSpace(newName))
             {
                 record.Name = newName;
@@ -96,14 +143,13 @@ public class TranslationDictionary
             {
                 foreach (var kvp in record.StringFields.ToList())
                 {
-                    string fieldKey = $"record{recordIndex}_{kvp.Key}";
+                    string fieldKey = $"record{record.StringId}_{kvp.Key}";
                     if (translations.TryGetValue(fieldKey, out var newValue) && !string.IsNullOrWhiteSpace(newValue))
                     {
                         record.StringFields[kvp.Key] = newValue;
                     }
                 }
             }
-            recordIndex++;
         }
     }
     public int getTotalToBeTranslated(string dictFilePath)
@@ -181,22 +227,30 @@ public class TranslationDictionary
     int batchSize = 100,
     Action<string, string, bool>? logTranslation = null,
     Action<string, string>? logError = null,
-    Func<List<string>, Task<List<string>>>? batchTranslateFunc = null)
+    Func<List<string>, Task<List<string>>>? batchTranslateFunc = null,
+    CancellationToken token=default)
     {
         var all = File.ReadAllText(dictFilePath).Split(lineEnd, StringSplitOptions.RemoveEmptyEntries);
         int totalSuccess = 0;
-
-        for (int batchStart = 0; batchStart < all.Length; batchStart += batchSize)
+        try
         {
-            int batchEnd = Math.Min(batchStart + batchSize, all.Length);
-            totalSuccess += await ProcessTranslationBatchAsync(
-                all, batchStart, batchEnd, translateFunc, batchTranslateFunc, logTranslation, logError);
+            for (int batchStart = 0; batchStart < all.Length; batchStart += batchSize)
+            {
+                token.ThrowIfCancellationRequested();
+                int batchEnd = Math.Min(batchStart + batchSize, all.Length);
+                totalSuccess += await ProcessTranslationBatchAsync(
+                    all, batchStart, batchEnd, translateFunc, batchTranslateFunc, logTranslation, logError, token).ConfigureAwait(false);
 
-            // Save after each batch
-            File.WriteAllText(dictFilePath, string.Join(lineEnd, all));
+                await Task.Run(() => File.WriteAllText(dictFilePath, string.Join(lineEnd, all)));
+
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            await Task.Run(() => File.WriteAllText(dictFilePath, string.Join(lineEnd, all)));
         }
 
-        return totalSuccess;
+return totalSuccess;
     }
 
     private static async Task<int> ProcessTranslationBatchAsync(
@@ -206,8 +260,10 @@ public class TranslationDictionary
     Func<string, Task<string>> translateFunc,
     Func<List<string>,Task<List<string>>>? batchTranslateFunc,
     Action<string, string, bool>? logTranslation,
-    Action<string, string>? logError)
+    Action<string, string>? logError,
+    CancellationToken token)
     {
+        token.ThrowIfCancellationRequested();
         int successCount = 0;
 
         var batch = all.Skip(batchStart).Take(batchEnd - batchStart).ToList();
@@ -225,13 +281,13 @@ public class TranslationDictionary
             try
             {
                 var originals = itemsToTranslate.Select(t => t.line.Split(sep)[1]).ToList();
-                //var translations = await batchTranslateFunc(originals, "en", "ru").ConfigureAwait(false);
                 var translations = await batchTranslateFunc(originals).ConfigureAwait(false);
 
                 if (translations != null && translations.Count == originals.Count)
                 {
                     for (int i = 0; i < itemsToTranslate.Count; i++)
                     {
+                        token.ThrowIfCancellationRequested();
                         var (line, index) = itemsToTranslate[i];
                         var parts = line.Split(sep);
                         parts[2] = translations[i];
@@ -243,6 +299,10 @@ public class TranslationDictionary
                     return successCount; // Batch succeeded, no need for per-item
                 }
             }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
             catch (Exception ex)
             {
                 Debug.WriteLine($"[TranslationDict] Batch translation failed: {ex.Message}");
@@ -252,6 +312,7 @@ public class TranslationDictionary
         // Per-item translation directly
         foreach (var (line, index) in itemsToTranslate)
         {
+            token.ThrowIfCancellationRequested();
             var parts = line.Split(sep);
             try
             {
@@ -262,9 +323,13 @@ public class TranslationDictionary
                 successCount++;
                 logTranslation?.Invoke(parts[1], translation, true);
             }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
             catch (Exception ex)
             {
-                parts[2] = parts[1];
+                parts[2] = "";
                 all[batchStart + index] = string.Join(sep, parts);
                 logError?.Invoke(parts[1], ex.Message);
             }
@@ -287,6 +352,7 @@ public class TranslationDictionary
             ?? await TryTranslateWithVerboseMarkersAsync(text, translateFunc, constants)
             ?? await TranslateSplitAsync(text, translateFunc, constants);
     }
+    /*
     public static int GetTranslationProgress(string dictFilePath)
     {
         if (!File.Exists(dictFilePath)) return 0;
@@ -296,5 +362,27 @@ public class TranslationDictionary
 
 
         return (int)Math.Round(Math.Ceiling(((translatedCount / (double)parts.Length) * 100)));
+    }*/
+    public static int GetTranslationProgress(string dictFilePath)
+    {
+        if (!File.Exists(dictFilePath))
+            return 0;
+
+        var parts = File.ReadAllText(dictFilePath)
+            .Split(lineEnd)
+            .Where(l => !string.IsNullOrWhiteSpace(l))
+            .ToArray();
+
+        if (parts.Length == 0)
+            return 100;
+
+        int translatedCount = parts.Count(line =>
+        {
+            var split = line.Split(sep);
+            return split.Length >= 3 &&
+                   !string.IsNullOrWhiteSpace(split[2]);
+        });
+
+        return (int)Math.Ceiling((translatedCount / (double)parts.Length) * 100);
     }
 }

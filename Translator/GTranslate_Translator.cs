@@ -1,6 +1,14 @@
 ﻿
+using GTranslate;
+using GTranslate.Results;
+using GTranslate.Translators;
+using System;
+using System.Collections.ObjectModel;
+using System.Data;
+
 namespace KenshiTranslator.Translator
 {
+
     public class GTranslate_Translator : TranslatorInterface
     {
         public string Name { get; private set; } = "Aggregate";
@@ -17,7 +25,7 @@ namespace KenshiTranslator.Translator
             { "Google", new GTranslate.Translators.GoogleTranslator()},
             { "Google2", new GTranslate.Translators.GoogleTranslator2()},
             { "Microsoft", new GTranslate.Translators.MicrosoftTranslator()},
-            { "Yandex", new GTranslate.Translators.YandexTranslator()}
+            { "Yandex", new GTranslate.Translators.YandexTranslator()},
         };
             current_translator = translators.GetValueOrDefault("Aggregate")!;
             
