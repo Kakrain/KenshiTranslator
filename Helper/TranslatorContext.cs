@@ -38,7 +38,7 @@ namespace KenshiTranslator.Helper
                 Custom = new CustomApiTranslator(path);
                 Active = Custom;
             }
-            if (provider == "Dummy")
+            else if (provider == "Dummy")
             {
                 Active = new DummyTranslator();
             }

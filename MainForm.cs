@@ -1,7 +1,10 @@
-﻿using KenshiCore.Mods;
+﻿using Google.Cloud.Translate.V3;
+using KenshiCore.Mods;
 using KenshiCore.ReverseEngineering;
 using KenshiCore.UI;
+using KenshiCore.Utilities;
 using KenshiTranslator.Helper;
+using Microsoft.VisualBasic;
 using Microsoft.VisualBasic.FileIO;
 using NTextCat;
 using System.Diagnostics;
@@ -12,7 +15,6 @@ namespace KenshiTranslator
     public class MainForm : ProtoMainForm
     {
         private readonly object reLockRE = new object();
-        private ModManager modM = ModManager.Instance;
         private RankedLanguageIdentifier? identifier;
         private ComboBox providerCombo;
         private ComboBox fromLangCombo;
@@ -24,12 +26,14 @@ namespace KenshiTranslator
         private Button testApiButton;
         private Label apiStatusLabel;
         private Button TranslateModButton;
-        private TranslatorService _translatorService = new();
+        private const string _columnName_TranslationProgress = "Translation Progress";
+        private const string _columnName_Language = "Language";
         private readonly TranslatorContext _translatorCtx = new();
+        private readonly TranslatorService _translatorService;
         private CancellationTokenSource _cancel_token = new();
         private Task? currentTranslationTask = null;
 
-        ReverseEngineer _reverseEngineer = new ReverseEngineer();
+        ReverseEngineer _reverseEngineer = new ReverseEngineer("translated.mod");
         public class ComboItem
         {
             public string Code { get; }
@@ -54,7 +58,9 @@ namespace KenshiTranslator
         {
             Text = "Kenshi Translator";
             Width = 800;
-            Height = 600;
+            Height = 700;
+
+            _translatorService= new TranslatorService(_translatorCtx);
 
             providerCombo = new ComboBox { Dock = DockStyle.Top, DropDownStyle = ComboBoxStyle.DropDownList };
             providerCombo.Items.AddRange(new string[] { "Aggregate", "Bing", "Google", "Google2", "Microsoft", "Yandex", "Google Cloud V3", "Custom API", "Dummy" });
@@ -78,24 +84,26 @@ namespace KenshiTranslator
             AddButton("Refresh Status", async (s, e) => await RefreshStatusButton_Click());
             AddButton("Create Dictionary", async (s, e) => await CreateDictionaryButton_Click());
             TranslateModButton = AddButton("Translate Mod", async (s, e) => await TranslateModButton_Click());
+            AddButton("Generate Translation", async (s, e) => await GenTranslationButton_Click());
 
             customApiTextBox = new TextBox
             {
-                Dock = DockStyle.Top,
+                /*Dock = DockStyle.Top,
                 PlaceholderText = "Enter DeepL key (ends with :fx) or Google key (starts with AIza)",
+                Visible = false,*/
+
+                Dock = DockStyle.None,
+                Width = 300,
+                Height = 25,
+                PlaceholderText = "Enter API key or URL",
                 Visible = false
             };
 
-            customApiTextBox.TextChanged += async (s, e) =>
-            {
-                await UpdateCustomApiAsync();
-            };
             buttonPanel.Controls.Add(customApiTextBox);
             testApiButton = new Button
             {
                 Text = "Test API",
                 AutoSize = true,
-                Enabled = false,
                 Visible = false
             };
             testApiButton.Click += async (s, e) => await TestApiButton_Click();
@@ -110,14 +118,14 @@ namespace KenshiTranslator
             };
             buttonPanel.Controls.Add(apiStatusLabel);
 
-            AddColumn("Language", mod => mod.Language);
+            AddColumn(_columnName_Language, mod => mod.Language);
 
 
             this.Load += async (s, e) =>
             {
                 await providerCombo_SelectedIndexChanged(null, null);
             };
-            AddColumn("Translation Progress", mod => getTranslationProgress(mod), 200);
+            AddColumn(_columnName_TranslationProgress, mod => getTranslationProgress(mod), 200);
 
             _translatorService.LogForm = getLogForm();
             ThemeManager.Set(
@@ -196,6 +204,10 @@ namespace KenshiTranslator
         }
         private void InitializeTranslatorColumns()
         {
+
+            SetColumnValues(_columnName_TranslationProgress,mod => getTranslationProgress(mod));
+            /*int column= GetColumnIndex(_columnName_TranslationProgress);
+
             foreach (ListViewItem item in modsListView.Items)
             {
                 var mod = (ModItem)item.Tag!;
@@ -206,7 +218,7 @@ namespace KenshiTranslator
                 item.SubItems[2].Text = getTranslationProgress(mod);
             }
 
-            modsListView.Refresh();
+            modsListView.Refresh();*/
         }
         protected override async void OnShown(EventArgs e)
         {
@@ -223,7 +235,7 @@ namespace KenshiTranslator
             LoadLanguageCache();
             InitializeTranslatorColumns();
 
-            await DetectAllLanguagesAsync();
+            DetectAllLanguagesAsync();
         }
         private void SaveSelectedLanguages()
         {
@@ -286,6 +298,11 @@ namespace KenshiTranslator
             SaveSelectedLanguages();
 
             ToggleCustomApiUI(provider);
+            if (provider == "Custom API")
+            {
+                customApiTextBox.Focus();
+                return;
+            }
 
             try
             {
@@ -300,12 +317,13 @@ namespace KenshiTranslator
             }
             catch (Exception ex)
             {
-                MessageBox.Show(ex.Message);
+                UiService.ShowMessage(ex.Message);
                 providerCombo.SelectedIndex = 0;
             }
         }
         private void LoadLanguageCache()
         {
+            int columnIndex = GetColumnIndex(_columnName_Language);
             string path = "languages.txt";
             if (!File.Exists(path))
                 return;
@@ -317,22 +335,19 @@ namespace KenshiTranslator
                 {
                     string modName = parts[0];
                     string cachedLang = parts[1];
-                    languageCache[modName] = cachedLang;
-                    if (mergedMods.TryGetValue(modName, out var mod))
+                    languageCache[modName] = cachedLang; 
+                    if (ModRepository.Instance.Mods.TryGetValue(modName, out var mod))
                     {
                         mod.Language = cachedLang;
-                        var item = modsListView.Items.Cast<ListViewItem>()
-                        .FirstOrDefault(i => ((ModItem)i.Tag!).Name == modName);
-
-                        if (item != null)
-                        {
-                            item.SubItems[1].Text = cachedLang;
-                            item.SubItems[1].ForeColor = colorLanguage(cachedLang);
-                        }
                     }
+                    int rowIndex = GetRowIndex(modName);
+                    if (rowIndex == -1)
+                        continue;
+                    
+                    SetValue(columnIndex,rowIndex, cachedLang);
+                    SetColor(columnIndex,rowIndex, colorLanguage(cachedLang));
                 }
             }
-            modsListView.Refresh();
         }
         private void SaveLanguageCache()
         {
@@ -345,8 +360,8 @@ namespace KenshiTranslator
                 }
             }
             catch (Exception ex)
-            {
-                MessageBox.Show("Failed to save language cache: " + ex.Message);
+            {   
+                UiService.ShowMessage("Failed to save language cache: " + ex.Message);
             }
         }
         private void InitLanguageDetector()
@@ -385,7 +400,7 @@ namespace KenshiTranslator
                 UiService.ShowMessage("Dictionary Translation Cancelled");
                 return;
             }
-            MessageBox.Show($"Dictionary generated for {sb.ToString()}!");
+            UiService.ShowMessage($"Dictionary generated for {sb.ToString()}!");
         }
         private Task StopAll()
         {
@@ -426,11 +441,11 @@ namespace KenshiTranslator
             string dictpath = mod.getDictFilePath();
             string backupPath = mod.getBackupFilePath();
             if (File.Exists(dictpath))
-                FileSystem.DeleteFile(dictpath, UIOption.OnlyErrorDialogs, RecycleOption.SendToRecycleBin);
+                Microsoft.VisualBasic.FileIO.FileSystem.DeleteFile(dictpath, UIOption.OnlyErrorDialogs, RecycleOption.SendToRecycleBin);
             if (File.Exists(backupPath))
             {
                 File.Copy(backupPath, mod.getModFilePath()!, overwrite: true);
-                FileSystem.DeleteFile(backupPath, UIOption.OnlyErrorDialogs, RecycleOption.SendToRecycleBin);
+                Microsoft.VisualBasic.FileIO.FileSystem.DeleteFile(backupPath, UIOption.OnlyErrorDialogs, RecycleOption.SendToRecycleBin);
             }
         }
         private async Task RefreshStatusButton_Click()
@@ -444,6 +459,34 @@ namespace KenshiTranslator
         }
         private async Task TestApiButton_Click()
         {
+            if (providerCombo.SelectedItem?.ToString() == "Custom API")
+            {
+                string apiInput = customApiTextBox.Text.Trim();
+                if (string.IsNullOrWhiteSpace(apiInput))
+                {
+                    apiStatusLabel.Text = "Please enter an API key or endpoint.";
+                    apiStatusLabel.ForeColor = Color.Red;
+                    return;
+                }
+
+                try
+                {
+                    var langs = await _translatorCtx.SetProviderAsync(
+                        "Custom API",
+                        () => customApiTextBox.Text.Trim(),
+                        msg => apiStatusLabel.Text = msg
+                    );
+
+                    BindLanguages(langs);
+                    RestoreSelectedLanguages(langs);
+                }
+                catch (Exception ex)
+                {
+                    apiStatusLabel.Text = $"API configuration error: {ex.Message}";
+                    apiStatusLabel.ForeColor = Color.Red;
+                    return;
+                }
+            }
             if (_translatorCtx.Active == null)
             {
                 apiStatusLabel.Text = "❌ No API configured";
@@ -452,7 +495,7 @@ namespace KenshiTranslator
             }
 
             testApiButton.Enabled = false;
-            apiStatusLabel.Text = "🔄 Testing API...";
+            apiStatusLabel.Text = $"🔄 Testing {providerCombo.SelectedItem}...";
             apiStatusLabel.ForeColor = Color.Orange;
 
             try
@@ -461,9 +504,11 @@ namespace KenshiTranslator
                 string testText = "Hello, world!";
                 string testResult = await _translatorCtx.Active.TranslateAsync(testText, "EN", "RU");
 
+                string testResultado = await _translatorCtx.Active.TranslateAsync(testText, "EN", "ES");
+
                 if (!string.IsNullOrEmpty(testResult) && testResult != testText)
                 {
-                    apiStatusLabel.Text = $"✅ API OK (Test: {testResult})";
+                    apiStatusLabel.Text = $"✅ API OK (Test: RU:{testResult}, ES:{testResultado})";
                     apiStatusLabel.ForeColor = Color.Green;
                 }
                 else
@@ -482,6 +527,81 @@ namespace KenshiTranslator
                 testApiButton.Enabled = true;
             }
         }
+        private string getTranslatedInventoryPath(string modpath)
+        {
+            return Path.ChangeExtension(modpath, "_translated_inventory.txt");
+        }
+        private async Task GenTranslationButton_Click()
+        {
+            string? modName = UiService.PromptForString("Enter the name for the new or existing mod:",caption: "Translation Mod");
+            if (modName == null)
+                return; // User cancelled.
+            if (string.IsNullOrWhiteSpace(modName))
+                return; // Empty input is disallowed by default.
+            modName = Path.GetFileNameWithoutExtension(modName);
+            string? modPath = findMod(modName);
+            ReverseEngineer transMod;
+            bool hastoUpdate = false;
+            if(modPath == null) {
+                string modDirectory = Path.Combine(ModManager.gamedirModsPath!,modName);
+                Directory.CreateDirectory(modDirectory);
+                modPath = Path.Combine(modDirectory, $"{modName}.mod");
+                transMod = ReverseEngineer.GenerateEmpty($"{modName}.mod");
+                hastoUpdate = true;
+            }
+            else
+            {
+                transMod = new ReverseEngineer($"{modName}.mod");
+                transMod.LoadModFile(modPath);
+            }
+
+            string translated_inventory_path = getTranslatedInventoryPath(modPath);
+            List<string> translatedmods = CoreUtils.ReadFileAsList(translated_inventory_path,false);
+            
+            modName = Path.GetFileNameWithoutExtension(modName) + ".mod";
+
+            var mods = getSelectedMods().Where(mod => File.Exists(mod.getDictFilePath())).ToList();
+            List<string> modnames = mods.Select(mod => mod.Name).ToList();
+
+            foreach (var mod in mods)
+            {
+                ReverseEngineer re= new ReverseEngineer(mod.Name);
+                re.LoadModFile(mod.getModFilePath()!);
+
+                TranslationDictionary td = new TranslationDictionary(re);
+                td.PatchIntoReverseEngineer(mod.getDictFilePath(), transMod);
+                RefreshRow(mod);
+            }
+            transMod.SaveModFile(modPath);
+            _translated_via_patch = null;
+            CoreUtils.WriteListToFile(translated_inventory_path, translatedmods.Concat(modnames).Distinct().ToList(), $"Translated mods:");
+            if(hastoUpdate)
+                reloadListView();
+            
+            foreach (var mod in mods)
+            {
+                RefreshRow(mod);
+                await UpdateModLanguageAsync(mod);
+            }
+
+            CoreUtils.Prompt("Translation generated successfully");
+        }
+        private string? findMod(string modname)
+        {
+            
+            string modPath = Path.Combine(ModManager.gamedirModsPath!, modname, $"{modname}.mod");
+            if (File.Exists(modPath))
+                return modPath;
+            string workshopPath = ModManager.workshopModsPath!;
+            if (Directory.Exists(workshopPath))
+            {
+                string? workshopMod = Directory.GetFiles(workshopPath, $"{modname}.mod", System.IO.SearchOption.AllDirectories).FirstOrDefault();
+
+                if (workshopMod != null)
+                    return workshopMod;
+            }
+            return null;
+        }
         private async Task TranslateModButton_Click()
         {
             var mods = getSelectedMods().ToList();
@@ -494,7 +614,7 @@ namespace KenshiTranslator
             }
             StringBuilder sb = new StringBuilder();
             sb.AppendJoin(", ", mods.ConvertAll(m => m.Name));
-            MessageBox.Show($"Translation for {sb.ToString()} is finished!");
+            UiService.ShowMessage($"Translation for {sb.ToString()} is finished!");
         }
         private void TranslateSingleMod(ModItem mod)
         {
@@ -528,12 +648,25 @@ namespace KenshiTranslator
         {
             return (lang == "eng|___") ? Color.Green : Color.Red;
         }
+
+        private List<string>? _translated_via_patch = null;
         private string getTranslationProgress(ModItem mod)
         {
+            if(_translated_via_patch == null)
+            {
+                _translated_via_patch = new List<string>();
+                foreach (var m in ModRepository.Instance.GetMergedMods().Values)
+                {
+                    List<string> translated_list = m.getModFilePath() != null && File.Exists(m.getModFilePath()!) ? CoreUtils.ReadFileAsList(getTranslatedInventoryPath(m.getModFilePath()!), false) : new List<string>();
+                    _translated_via_patch.AddRange(translated_list);
+                }
+            }
             if (mod.getModFilePath() == null)
                 return "mod not found";
             if (File.Exists(mod.getBackupFilePath()))
                 return "Translated";
+            if (_translated_via_patch.Contains(mod.Name))
+                return "Translated via patch";
             var dictpath = mod.getDictFilePath();
             if (File.Exists(dictpath))
             {
@@ -557,7 +690,19 @@ namespace KenshiTranslator
             {
                 return await Task.Run(() =>
                 {
-                    _reverseEngineer.LoadModFile(mod.getModFilePath()!);
+                    if(!File.Exists(mod.getModFilePath()))
+                    {
+                        return "mod file not found";
+                    }
+                    try
+                    {
+                        _reverseEngineer.LoadModFile(mod.getModFilePath()!);
+                    }
+                    catch (UnsupportedModFileException ex)
+                    {
+                        Console.WriteLine(ex.Message);
+                        return $"unsupported filetype {ex.FileType}";
+                    }
                     var lang_tuple = _reverseEngineer.getModSummary();
                     var alpha_mostCertain = detectLanguageFor(lang_tuple.Item1);
                     var sign_mostCertain = detectLanguageFor(lang_tuple.Item2);
@@ -570,51 +715,64 @@ namespace KenshiTranslator
                 return $"Error: {ex.Message}";
             }
         }
-        private async Task DetectAllLanguagesAsync()
+        private void DetectAllLanguagesAsync()
         {
-            var modsToDetect = modsListView.Items
-                .Cast<ListViewItem>()
-                .Select(item => (ModItem)item.Tag!)
-                .Where(mod => !languageCache.ContainsKey(mod.Name))
-                .ToList();
+            var modsToDetect = ModRepository.Instance.Mods.Values.Where(mod => !languageCache.ContainsKey(mod.Name)).ToList();
 
             int total = modsToDetect.Count;
             ProgressController progress = ProgressController.Instance;
             progress.Initialize(total);
+
             int n_progress = 0;
-            foreach (var mod in modsToDetect)
+
+            ProgressController.ForEach(modsToDetect, async mod =>
             {
                 await UpdateModLanguageAsync(mod);
-
                 n_progress++;
                 if (n_progress % 10 == 0)
                     progress.Report(n_progress, $"detected {mod.Name}");
-
                 await Task.Delay(10);
-            }
+            }, "Detecting languages...");
+
             progress.Finish("Language detection complete!");
             SaveLanguageCache();
         }
         private async Task UpdateModLanguageAsync(ModItem mod)
         {
             string detected = await DetectModLanguagesAsync(mod);
+            InvokeOnUiThread(() => ApplyDetectedLanguage(mod, detected));
+        }
 
-            if (modsListView.InvokeRequired)
+        public void reloadListView()
+        {
+            LoadMods();
+            PopulateModsListView();
+            LoadLanguageCache();
+        }
+        public void refreshListView()
+        {
+            foreach (var mod in ModRepository.Instance.Mods.Values)
             {
-                modsListView.Invoke(new Action(() =>
-                    ApplyDetectedLanguage(mod, detected)));
-            }
-            else
-            {
-                ApplyDetectedLanguage(mod, detected);
+                int row = GetRowIndex(mod.Name);
+                if (row != -1)
+                {
+                    SetValue(GetColumnIndex(_columnName_Language), row, mod.Language);
+                    SetColor(GetColumnIndex(_columnName_Language), row, colorLanguage(mod.Language));
+                    SetValue(GetColumnIndex(_columnName_TranslationProgress), row, getTranslationProgress(mod));
+                }
             }
         }
         private void ApplyDetectedLanguage(ModItem mod, string detected)
         {
             languageCache[mod.Name] = detected;
             mod.Language = detected;
+            int row = GetRowIndex(mod.Name);
 
-            var item = modsListView.Items
+            SetValue(GetColumnIndex(_columnName_Language),row, detected);
+            SetColor(GetColumnIndex(_columnName_Language), row, colorLanguage(detected));
+            SetValue(GetColumnIndex(_columnName_TranslationProgress), row, getTranslationProgress(mod));
+
+        } /*var item = modsListView.Items
                 .Cast<ListViewItem>()
                 .FirstOrDefault(i => ((ModItem)i.Tag!).Name == mod.Name);
 
@@ -622,7 +780,6 @@ namespace KenshiTranslator
             {
                 item.SubItems[1].Text = detected;
                 item.SubItems[1].ForeColor = colorLanguage(detected);
-            }
-        }
+            }*/
     }
 }

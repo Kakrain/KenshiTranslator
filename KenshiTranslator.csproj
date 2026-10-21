@@ -15,13 +15,19 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|AnyCPU'">
     <WarningLevel>4</WarningLevel>
   </PropertyGroup>
-
+  
   <ItemGroup>
-    <None Remove="LanguageModels\Core14.profile.xml" />
-  </ItemGroup>
-
-  <ItemGroup>
+	  <None Remove="LanguageModels\Core14.profile.xml" />
+	  <None Remove="translator_field_blacklist.txt" />
+	  <None Remove="translator_record_type_whitelist.txt" />
+  
     <Content Include="LanguageModels\Core14.profile.xml">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="translator_field_blacklist.txt">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="translator_record_type_whitelist.txt">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
   </ItemGroup>

@@ -14,18 +14,25 @@ namespace KenshiTranslator.Helper
 {
     public class TranslatorService
     {
-        private readonly TranslatorContext _translatorCtx = new();
-        ReverseEngineer _reverseEngineer = new ReverseEngineer();
-        private readonly SynchronizationContext? _uiContext;
-        public GeneralLogForm? LogForm { get; set; }
-        public TranslatorService()
+        private readonly TranslatorContext _translatorCtx;// = new();
+
+        public TranslatorService(TranslatorContext translatorCtx)
         {
+            _translatorCtx = translatorCtx;
             _uiContext = SynchronizationContext.Current;
         }
+        private readonly SynchronizationContext? _uiContext;
+        public GeneralLogForm? LogForm { get; set; }
+        /*public TranslatorService()
+        {
+            _uiContext = SynchronizationContext.Current;
+        }*/
         private string PrepareDictionary(ModItem mod, string modPath, out TranslationDictionary td)
         {
             string dictFile = mod.getDictFilePath();
 
+            //_reverseEngineer.setModName(Path.GetFileName(modPath));
+            ReverseEngineer _reverseEngineer = new ReverseEngineer(Path.GetFileName(modPath));
             _reverseEngineer.LoadModFile(modPath);
             td = new TranslationDictionary(_reverseEngineer);
 
@@ -49,13 +56,14 @@ namespace KenshiTranslator.Helper
             string modPath = mod.getModFilePath()!;
             if (!ValidateModPath(modPath)) return;
 
-            string dictFile = PrepareDictionary(mod, modPath, out var td);
-
-
-            int total = td.getTotalToBeTranslated(dictFile);
-            ProgressController.Instance.Initialize(total);
+            
+            if (!ValidateModPath(modPath)) return;
             try
             {
+                string dictFile = PrepareDictionary(mod, modPath, out var td);
+                int total = td.getTotalToBeTranslated(dictFile);
+
+                ProgressController.Instance.Initialize(total);
                 int successCount = await RunTranslation(
                     dictFile,
                     mod.Name,
@@ -68,10 +76,16 @@ namespace KenshiTranslator.Helper
 
                 HandleTranslationResult(mod, successCount, total);
             }
+            catch (UnsupportedModFileException ex)
+            {
+                UiService.ShowMessage($"Unsupported mod file: {ex.Message}", "Error", MessageBoxIcon.Error);
+                return;
+            }
             catch (Exception ex)
             {
                 HandleTranslationError(ex);
             }
+            
         }
         private async Task<int> RunTranslation(
     string dictFile,
@@ -89,9 +103,11 @@ namespace KenshiTranslator.Helper
             var progress = ProgressController.Instance;
 
             var batchFunc = GetBatchTranslator(sourceLang, targetLang);
+            CoreUtils.Print($"Active type: {_translatorCtx.Active.GetType().FullName}");
+            CoreUtils.Print($"Active name: {_translatorCtx.Active.Name}");
 
             CoreUtils.Print("Batch translation enabled: " + (batchFunc != null));
-
+            
             await TranslationDictionary.ApplyTranslationsAsync(
                 dictFile,
                 async original =>
@@ -127,11 +143,10 @@ namespace KenshiTranslator.Helper
                     }
 
                 },
-                batchFunc != null ? 100 : 200, 
+                //batchFunc != null ? 100 : 200, 
+                batchFunc != null ? 5 : 200,
                 (o, t, ok) =>_uiContext?.Post(_ => LogForm?.Log($"{o} : {t} {(ok ? "✓" : "✗")}", null), null),
                 (o, err) =>_uiContext?.Post(_ => LogForm?.LogError($"{o}:{err}"), null),
-                //(o, t, ok) => logform?.Log($"{o} : {t} {(ok ? "✓" : "✗")}", null),
-                //(o, err) => logform?.LogError($"{o}:{err}"),
                 batchFunc,
                 token
             );
@@ -139,13 +154,17 @@ namespace KenshiTranslator.Helper
             return successCount;
         }
 
-        private Func<List<string>, Task<List<string>>>? GetBatchTranslator(string sourceLang, string targetLang)
+        private Func<List<string>, Task<List<string>>>? GetBatchTranslator(
+    string sourceLang, string targetLang)
         {
-            if (_translatorCtx.Active is CustomApiTranslator customApi &&
-                customApi.CurrentApiType == ApiType.GoogleCloudV3)
+            if (_translatorCtx.Active is CustomApiTranslator customApi)
             {
-                Debug.WriteLine("[MainForm] Using Google V3 batch translation");
-                return texts => customApi.TranslateBatchV3Async(texts, sourceLang, targetLang);
+                if (customApi.CurrentApiType == ApiType.Ollama)
+                    return texts => customApi.TranslateOllamaAsyncGeneral(texts, sourceLang, targetLang);
+                //return texts => customApi.TranslateBatchOllamaAsync(texts, sourceLang, targetLang);
+
+                if (customApi.CurrentApiType == ApiType.GoogleCloudV3)
+                    return texts => customApi.TranslateBatchV3Async(texts, sourceLang, targetLang);
             }
 
             return null;
@@ -154,11 +173,6 @@ namespace KenshiTranslator.Helper
         {
             ProgressController.Instance.Finish($"Translation aborted. {ex.Message}");
             UiService.ShowMessage($"Dictionary translation failed: {ex.Message}");
-            /*MessageBox.Show(
-                $"Dictionary translation failed: {ex.Message}",
-                "Error",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Error);*/
         }
         private void HandleTranslationResult(ModItem mod, int successCount, int total)
         {

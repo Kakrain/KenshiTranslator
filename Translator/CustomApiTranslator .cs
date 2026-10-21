@@ -3,6 +3,8 @@ using System.Text.Json;
 using System.Diagnostics;
 using Google.Cloud.Translate.V3;
 using Google.Api.Gax.ResourceNames;
+using System.Runtime.CompilerServices;
+using KenshiCore.Utilities;
 
 namespace KenshiTranslator.Translator
 {
@@ -11,7 +13,8 @@ namespace KenshiTranslator.Translator
         DeepL,
         GoogleCloud,
         GoogleCloudV3,
-        Generic
+        Generic,
+        Ollama
     }
 
     public class CustomApiTranslator : TranslatorInterface
@@ -21,6 +24,8 @@ namespace KenshiTranslator.Translator
         private readonly ApiType _apiType;
         private TranslationServiceClient? _googleV3Client;
         private string? _projectId;
+        private const char separator = '\u001F'; // Unit Separator for batch translation
+
 
         public string Name => "Custom API";
 
@@ -79,7 +84,11 @@ namespace KenshiTranslator.Translator
             {
                 return ApiType.GoogleCloudV3;
             }
-
+            // Ollama API keys typically:
+            if (Uri.TryCreate(apiInput, UriKind.Absolute, out var uri) && uri.Scheme is "http" or "https"&& uri.AbsolutePath.TrimEnd('/').Length == 0 && uri.Host is "localhost" or "127.0.0.1")
+            {
+                return ApiType.Ollama;
+            }
             // If it starts with http, it's a generic endpoint
             if (apiInput.StartsWith("http"))
             {
@@ -111,7 +120,81 @@ namespace KenshiTranslator.Translator
                 throw new InvalidOperationException($"Failed to initialize Google Cloud Translation V3: {ex.Message}", ex);
             }
         }
+        public async Task<List<string>> TranslateOllamaAsyncGeneral(
+            List<string> texts, string sourceLang, string targetLang)
+        {
+            try
+            {
+                return await TranslateBatchOllamaAsync(texts, sourceLang, targetLang);
+            }
+            catch (Exception ex)
+            {
+                CoreUtils.Print($"[Ollama] Batch failed; retrying individually: {ex.Message}");
+            }
 
+            var results = new List<string>();
+
+            foreach (var text in texts)
+            {
+                var translationlist = await TranslateBatchOllamaAsync(new List<string> { text }, sourceLang, targetLang);
+                var translation = translationlist.FirstOrDefault();
+
+                if (string.IsNullOrWhiteSpace(translation)) throw new InvalidOperationException( $"Translation failed for: {text}");
+
+                results.Add(translation);
+            }
+
+            return results;
+        }
+        public async Task<List<string>> TranslateBatchOllamaAsync(List<string> texts,string sourceLang, string targetLang)
+        {
+            if (texts == null || texts.Count == 0)
+                return new List<string>();
+
+            var requestData = new
+            {
+                model = "mistral:latest",
+                prompt = $"""
+                Translate each input string from {sourceLang} to {targetLang}.
+                Preserve game tokens, placeholders, variable names, and formatting.
+                Translate each string independently.
+                Return ONLY a JSON object with a "translations" array.
+                The array must contain exactly {texts.Count} strings in the same order
+                as the inputs. Do not merge, omit, or add entries.
+
+                Inputs:
+                {JsonSerializer.Serialize(texts)}
+                """,
+                        format = "json",
+                        stream = false,
+                        keep_alive = "10m"
+                    };
+
+                var json = JsonSerializer.Serialize(requestData);
+                using var content = new StringContent(json, Encoding.UTF8, "application/json");
+
+                var endpoint = new Uri(new Uri(_apiKey.TrimEnd('/') + "/"),"api/generate");
+
+                using var response = await _httpClient.PostAsync(endpoint, content);
+                var responseContent = await response.Content.ReadAsStringAsync();
+                response.EnsureSuccessStatusCode();
+
+                using var document = JsonDocument.Parse(responseContent);
+                var output = document.RootElement.GetProperty("response").GetString();
+
+                if (string.IsNullOrWhiteSpace(output))
+                    throw new InvalidOperationException("Ollama returned an empty batch.");
+
+                using var resultDocument = JsonDocument.Parse(output);
+                var translations = resultDocument.RootElement.GetProperty("translations").EnumerateArray().
+                Select(item => item.GetString()?? throw new InvalidOperationException("Ollama returned a non-string translation.")).ToList();
+
+                if (translations.Count != texts.Count)
+                    throw new InvalidOperationException(
+                        $"Expected {texts.Count} translations, got {translations.Count}.");
+
+                return translations;
+        }
         public async Task<string> TranslateAsync(string text, string sourceLang = "auto", string targetLang = "en")
         {
             try
@@ -124,6 +207,7 @@ namespace KenshiTranslator.Translator
                     ApiType.GoogleCloud => await TranslateWithGoogle(text, sourceLang, targetLang),
                     ApiType.GoogleCloudV3 => await TranslateWithGoogleV3(text, sourceLang, targetLang),
                     ApiType.Generic => await TranslateWithGenericApi(text, sourceLang, targetLang),
+                    ApiType.Ollama => await TranslateWithOllama(text, sourceLang, targetLang),
                     _ => throw new NotSupportedException($"API type {_apiType} not supported")
                 };
             }
@@ -133,7 +217,36 @@ namespace KenshiTranslator.Translator
                 throw new Exception($"Custom API translation failed: {ex.Message}", ex);
             }
         }
+        private async Task<string> TranslateWithOllama(string text,string sourceLang,string targetLang)
+        {
+            var requestData = new
+            {
+                model = "translategemma:4b",
+                prompt = $"""
+                Translate the following text from {sourceLang}to {targetLang}.
+                Preserve formatting, placeholders, game tokens,and variable names. Return only the translation.
+                Text:{text}
+                """,
+                stream = false
+            };
 
+            var json = JsonSerializer.Serialize(requestData);
+            using var content = new StringContent(json, Encoding.UTF8, "application/json");
+
+            var endpoint = new Uri(new Uri(_apiKey.TrimEnd('/') + "/"),"api/generate");
+
+            var response = await _httpClient.PostAsync(endpoint, content);
+            var responseContent = await response.Content.ReadAsStringAsync();
+
+            response.EnsureSuccessStatusCode();
+
+            using var document = JsonDocument.Parse(responseContent);
+
+            if (document.RootElement.TryGetProperty("response", out var result))
+                return result.GetString() ?? text;
+
+            throw new InvalidOperationException( "Ollama response did not contain a 'response' field.");
+        }
         private async Task<string> TranslateWithDeepL(string text, string sourceLang, string targetLang)
         {
             // Use free API endpoint for keys ending with :fx, otherwise use paid endpoint
